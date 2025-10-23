@@ -19,32 +19,51 @@ class ExamSessionController extends Controller
         try {
             $user = Auth::user();
             $exam = Exam::findOrFail($examId);
-
-            // Cek apakah user sudah punya sesi ujian yang belum disubmit
             $existing = ExamSession::where('user_id', $user->id)
                 ->where('exam_id', $exam->id)
                 ->where('is_submitted', false)
                 ->first();
 
-            // Kalau sudah ada sesi aktif, langsung gunakan sesi lama
-            $session = $existing ?? ExamSession::create([
-                'user_id' => $user->id,
-                'exam_id' => $exam->id,
-                'started_at' => now(),
-            ]);
+            if ($existing) {
+                if (empty($existing->question_order)) {
+                    Log::warning("Sesi lama tanpa question_order → hapus dan buat baru");
+                    $existing->delete();
+                    $existing = null;
+                }
+            }
+            if ($existing) {
 
-            // Ambil pertanyaan dari database
-            $questions = Question::where('exam_id', $exam->id)
-                ->inRandomOrder()
-                ->limit($exam->total_questions)
-                ->get(['id', 'type', 'question_text', 'image', 'options']);
+                $questionIds = $existing->question_order;
+                $questionsById = Question::whereIn('id', $questionIds)
+                    ->get(['id', 'type', 'question_text', 'image', 'options'])
+                    ->keyBy('id');
 
-            // Format setiap pertanyaan
+                $questions = collect($questionIds)->map(function ($id) use ($questionsById) {
+                    return $questionsById->get($id);
+                })->filter()->values();
+
+                $session = $existing;
+            } else {
+                $questions = Question::where('exam_id', $exam->id)
+                    ->inRandomOrder()
+                    ->limit($exam->total_questions)
+                    ->get(['id', 'type', 'question_text', 'image', 'options']);
+
+                $questionIds = $questions->pluck('id')->toArray();
+
+                $session = ExamSession::create([
+                    'user_id' => $user->id,
+                    'exam_id' => $exam->id,
+                    'started_at' => now(),
+                    'question_order' => $questionIds,
+                ]);
+            }
+
+            // Format soal
             $questions->each(function ($q) {
                 if ($q->image) {
                     $q->image_url = asset('storage/' . $q->image);
                 }
-
                 $options = $q->options;
                 foreach ($options as $key => $value) {
                     if (is_string($value) && preg_match('/\.(jpg|jpeg|png|gif)$/i', $value)) {
@@ -53,6 +72,7 @@ class ExamSessionController extends Controller
                 }
                 $q->options = $options;
             });
+
 
             return response()->json([
                 'session_id' => $session->id,
@@ -63,20 +83,20 @@ class ExamSessionController extends Controller
                     'total_questions' => $exam->total_questions,
                 ],
                 'questions' => $questions,
-                'message' => $existing
-                    ? 'Sesi ujian lama dilanjutkan'
-                    : 'Sesi ujian baru dimulai',
+                'message' => $existing ? 'Sesi ujian lama dilanjutkan' : 'Sesi ujian baru dimulai',
             ], 200);
-        } catch (ModelNotFoundException $e) {
-            return response()->json([
-                'message' => 'Ujian tidak ditemukan',
-            ], 404);
         } catch (\Exception $e) {
+            Log::error("=== FATAL ERROR in start() ===", [
+                'message' => $e->getMessage(),
+                'line' => $e->getLine(),
+                'file' => $e->getFile(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+
             return response()->json([
                 'message' => 'Gagal memulai ujian',
                 'error' => $e->getMessage(),
                 'line' => $e->getLine(),
-                'file' => $e->getFile(),
             ], 500);
         }
     }
@@ -100,15 +120,23 @@ class ExamSessionController extends Controller
 
             $answers = $request->input('answers');
             $correctCount = 0;
+            $total = count($answers);
+
+            // Validasi: semua soal harus milik exam ini
+            $questionIds = array_column($answers, 'question_id');
+            $validQuestions = Question::whereIn('id', $questionIds)
+                ->where('exam_id', $session->exam_id)
+                ->pluck('id')
+                ->toArray();
+
+            if (count($validQuestions) !== count($questionIds)) {
+                return response()->json([
+                    'message' => 'Beberapa soal tidak valid untuk ujian ini',
+                ], 400);
+            }
 
             foreach ($answers as $ans) {
                 $question = Question::find($ans['question_id']);
-                if (!$question || $question->exam_id !== $session->exam_id) {
-                    return response()->json([
-                        'message' => 'Soal tidak valid untuk ujian ini',
-                    ], 400);
-                }
-
                 $isCorrect = $question->correct_answer === $ans['answer'];
 
                 ExamAnswer::updateOrCreate(
@@ -119,8 +147,7 @@ class ExamSessionController extends Controller
                 if ($isCorrect) $correctCount++;
             }
 
-            $total = count($answers);
-            $score = round(($correctCount / $total) * 100, 2);
+            $score = $total > 0 ? round(($correctCount / $total) * 100, 2) : 0;
 
             $session->update([
                 'is_submitted' => true,
@@ -204,7 +231,7 @@ class ExamSessionController extends Controller
                     'correct_answer' => $question->correct_answer,
                     'user_answer' => $answer->answer,
                     'is_correct' => $isCorrect,
-                    'image_url' => $question->image ? asset('storage/' . $question->image) : null,
+                    'image_url' => $question->image,
                     'explanation' => $question->explanation ?? 'Tidak ada pembahasan.',
                 ];
             }

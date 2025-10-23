@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Exam;
 use Illuminate\Support\Facades\Auth;
+use App\Models\ExamSession;
 
 class ExamController extends Controller
 {
@@ -18,7 +19,7 @@ class ExamController extends Controller
             }
 
             $exams = Exam::select('id', 'title', 'duration_minutes', 'total_questions')->get();
-            $sessions = \App\Models\ExamSession::with('exam:id,title')
+            $sessions = ExamSession::with('exam:id,title')
                 ->where('user_id', $userId)
                 ->orderBy('started_at', 'desc')
                 ->get();

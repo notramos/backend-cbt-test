@@ -14,6 +14,7 @@ class ExamSession extends Model
     protected $casts = [
         'started_at' => 'datetime',
         'submitted_at' => 'datetime',
+        'question_order' => 'array',
     ];
     public function user()
     {
